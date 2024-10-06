@@ -1,75 +1,114 @@
-from pynput import mouse, keyboard
+import pynput
+import pyautogui
 import time
-import json
-import os
+import threading
 
-actions = []
-recording = True
-stop_listeners = False  # Global flag to stop both listeners
-input_buffer = ""  # Buffer to store typed keys for detecting "end"
+# Global variables for recording and control
+recording = False
+actions_log = []
+command = ""
+
+# Lock for thread-safe access to shared variables
+lock = threading.Lock()
 
 
+# Function to capture keyboard events
+def on_keyboard_event(key):
+    with lock:
+        if recording:
+            try:
+                actions_log.append(('key_press', key.char, time.time()))
+            except AttributeError:
+                actions_log.append(('key_press', str(key), time.time()))
+
+
+# Function to capture mouse events
 def on_click(x, y, button, pressed):
-    global stop_listeners
-    if stop_listeners:
-        return False  # Stop the mouse listener
-    if recording:
-        actions.append(('mouse', time.time(), x, y, button.name, pressed))
+    with lock:
+        if recording and pressed:
+            actions_log.append(('mouse_click', (x, y, button), time.time()))
 
 
-def on_press(key):
-    global recording, stop_listeners, input_buffer
-    if recording:
-        try:
-            key_name = key.char if hasattr(key, 'char') else key.name
-            actions.append(('keyboard', time.time(), key_name, 'press'))
-            # Check if the key pressed is a character and append it to the buffer
-            if hasattr(key, 'char'):
-                input_buffer += key.char
-                # If "end" is typed, stop recording
-                if "end" in input_buffer:
-                    print("End command received. Stopping recording.")
-                    recording = False
-                    stop_listeners = True
-                    return False  # Stop the keyboard listener
-            # Limit the buffer size to avoid it growing too large
-            input_buffer = input_buffer[-10:]
-        except AttributeError:
-            pass
+# Function to start recording input events
+def start_recording():
+    global recording, actions_log
+    with lock:
+        recording = True
+        actions_log = []
+    print("Recording started...")
 
 
-def on_release(key):
-    if recording:
-        try:
-            key_name = key.char if hasattr(key, 'char') else key.name
-            actions.append(('keyboard', time.time(), key_name, 'release'))
-        except AttributeError:
-            actions.append(('keyboard', time.time(), str(key), 'release'))
-
-
-def record_actions():
+# Function to stop recording input events
+def stop_recording():
     global recording
-    print("Recording started. Type 'end' to stop recording.")
-
-    # Set up the mouse and keyboard listeners
-    with mouse.Listener(on_click=on_click) as mouse_listener, \
-            keyboard.Listener(on_press=on_press, on_release=on_release) as keyboard_listener:
-        keyboard_listener.join()
-        mouse_listener.join()
-
+    with lock:
+        recording = False
     print("Recording stopped.")
 
 
-def save_log():
-    # Define the file path on the desktop
-    desktop = os.path.join(os.path.join(os.environ['USERPROFILE']), 'Desktop')
-    log_file = os.path.join(desktop, "actions_log.json")
-
-    with open(log_file, "w") as file:
-        json.dump(actions, file, indent=4, default=str)
-    print(f"Action log saved to {log_file}")
+# Function to print the recorded log
+def print_log():
+    with lock:
+        for action in actions_log:
+            print(action)
 
 
-if __name__ == "__main__":
-    record_actions()
-    save_log()
+# Function to replay recorded actions
+def replay_actions():
+    with lock:
+        if not actions_log:
+            print("No actions recorded.")
+            return
+        # Calculate time differences between actions
+        initial_time = actions_log[0][2]
+        for action in actions_log:
+            action_type, action_detail, timestamp = action
+            time.sleep(timestamp - initial_time)
+            initial_time = timestamp
+
+            if action_type == 'key_press':
+                if len(action_detail) == 1:  # Single character
+                    pyautogui.press(action_detail)
+                else:
+                    print(f"Unrecognized key: {action_detail}")
+
+            elif action_type == 'mouse_click':
+                x, y, button = action_detail
+                pyautogui.click(x, y)
+
+    print("Action replay complete.")
+
+
+# Command interface for user inputs
+def command_interface():
+    global command
+    print("Command Interface Started. Enter commands: start, stop, print, replay, or exit.")
+    while command.lower() != 'exit':
+        command = input("Enter command: ").lower()
+        if command == "start":
+            start_recording()
+        elif command == "stop":
+            stop_recording()
+        elif command == "print":
+            print_log()
+        elif command == "replay":
+            replay_actions()
+        elif command == "exit":
+            print("Exiting script...")
+        else:
+            print(f"Unknown command: {command}")
+
+
+# Start listeners in separate threads
+keyboard_listener = pynput.keyboard.Listener(on_press=on_keyboard_event)
+mouse_listener = pynput.mouse.Listener(on_click=on_click)
+
+keyboard_listener.start()
+mouse_listener.start()
+
+# Run the command interface in the main thread
+command_interface()
+
+# Stop listeners after exiting
+keyboard_listener.stop()
+mouse_listener.stop()
